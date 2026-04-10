@@ -1,0 +1,35 @@
+name: crypto
+asset_class: crypto
+source: alpaca
+description: Crypto pairs tradable on Alpaca + major coins via FMP fallback
+symbols:
+  - BTC/USD
+  - ETH/USD
+  - SOL/USD
+  - AVAX/USD
+  - LINK/USD
+  - DOT/USD
+  - LTC/USD
+  - BCH/USD
+  - UNI/USD
+  - AAVE/USD
+  - MKR/USD
+  - XTZ/USD
+  - SUSHI/USD
+  - YFI/USD
+  - GRT/USD
+  - SHIB/USD
+  - DOGE/USD
+fmp_fallback:
+  - BTCUSD
+  - ETHUSD
+  - SOLUSD
+  - ADAUSD
+  - XRPUSD
+  - DOGEUSD
+  - TRXUSD
+  - MATICUSD
+  - LTCUSD
+  - LINKUSD
+priority: high
+backfill_years: 10

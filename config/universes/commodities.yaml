@@ -1,0 +1,36 @@
+name: commodities
+asset_class: commodity
+source: fmp
+description: Physical commodities via FMP XXXUSD spot tickers (stable endpoint)
+symbols:
+  - GCUSD   # Gold
+  - SIUSD   # Silver
+  - PLUSD   # Platinum
+  - PAUSD   # Palladium
+  - HGUSD   # Copper
+  - BZUSD   # Brent crude
+  - CLUSD   # WTI crude (fallback: USO ETF if fails)
+  - NGUSD   # Natural gas
+  - HOUSD   # Heating oil
+  - RBUSD   # Gasoline
+  - ZCUSD   # Corn
+  - ZWUSD   # Wheat
+  - ZSUSD   # Soybeans
+  - ZLUSD   # Soybean oil
+  - ZMUSD   # Soybean meal
+  - KCUSD   # Coffee
+  - CCUSD   # Cocoa
+  - SBUSD   # Sugar
+  - CTUSD   # Cotton
+  - OJUSD   # Orange juice
+  - LEUSD   # Live cattle
+  - LBUSD   # Lumber
+fallback_etfs:
+  CL: USO
+  NG: UNG
+  HG: CPER
+  ZC: CORN
+  ZW: WEAT
+  ZS: SOYB
+priority: high
+backfill_years: 25

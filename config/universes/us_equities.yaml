@@ -1,0 +1,13 @@
+name: us_equities
+asset_class: equity
+source: alpaca
+description: All active US equities tradable on Alpaca
+selection:
+  method: alpaca_active_assets
+  filters:
+    tradable: true
+    status: active
+    exchange: [NYSE, NASDAQ, ARCA, AMEX, BATS]
+  cap_count: 8000
+priority: high
+backfill_years: 15

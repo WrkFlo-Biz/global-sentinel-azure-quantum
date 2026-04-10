@@ -1,0 +1,48 @@
+name: country_etfs
+asset_class: etf
+source: alpaca
+description: Country and region ETFs as proxies for international markets
+symbols:
+  - EWJ   # Japan
+  - EWZ   # Brazil
+  - EWG   # Germany
+  - EWU   # UK
+  - EWC   # Canada
+  - EWA   # Australia
+  - EWW   # Mexico
+  - EWY   # South Korea
+  - EWT   # Taiwan
+  - EWH   # Hong Kong
+  - EWS   # Singapore
+  - EWP   # Spain
+  - EWQ   # France
+  - EWI   # Italy
+  - EWD   # Sweden
+  - EWN   # Netherlands
+  - EWL   # Switzerland
+  - EWM   # Malaysia
+  - EWK   # Belgium
+  - EWO   # Austria
+  - FXI   # China large cap
+  - MCHI  # China broad
+  - KWEB  # China internet
+  - ASHR  # China A-shares
+  - INDA  # India
+  - INDY  # India 50
+  - EPI   # India earnings
+  - RSX   # Russia (delisted but historical)
+  - TUR   # Turkey
+  - EZA   # South Africa
+  - ARGT  # Argentina
+  - GXG   # Colombia
+  - ECH   # Chile
+  - EPOL  # Poland
+  - GREK  # Greece
+  - VNM   # Vietnam
+  - THD   # Thailand
+  - EIDO  # Indonesia
+  - EPHE  # Philippines
+  - EIS   # Israel
+  - KSA   # Saudi Arabia
+priority: high
+backfill_years: 15

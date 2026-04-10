@@ -1,0 +1,22 @@
+name: fx_majors
+asset_class: fx
+source: fmp
+description: Major FX pairs via FMP forex stable endpoint
+symbols:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+  - USDCHF
+  - AUDUSD
+  - USDCAD
+  - NZDUSD
+  - EURGBP
+  - EURJPY
+  - GBPJPY
+  - EURCHF
+  - AUDJPY
+  - CADJPY
+  - NZDJPY
+  - CHFJPY
+priority: high
+backfill_years: 25

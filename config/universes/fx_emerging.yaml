@@ -1,0 +1,27 @@
+name: fx_emerging
+asset_class: fx
+source: fmp
+description: Emerging market FX pairs
+symbols:
+  - USDCNH
+  - USDMXN
+  - USDBRL
+  - USDZAR
+  - USDTRY
+  - USDKRW
+  - USDINR
+  - USDRUB
+  - USDTHB
+  - USDSGD
+  - USDHKD
+  - USDTWD
+  - USDIDR
+  - USDPHP
+  - USDPLN
+  - USDCZK
+  - USDHUF
+  - USDILS
+  - USDCLP
+  - USDARS
+priority: medium
+backfill_years: 20

@@ -1,0 +1,47 @@
+name: rates_macro
+asset_class: macro
+source: fred
+description: Rates, macro, and economic series from FRED
+series:
+  rates:
+    - DGS1MO
+    - DGS3MO
+    - DGS6MO
+    - DGS1
+    - DGS2
+    - DGS5
+    - DGS7
+    - DGS10
+    - DGS20
+    - DGS30
+    - DFF      # Fed funds effective
+    - FEDFUNDS # Fed funds target
+    - SOFR
+    - T10Y2Y   # 10y-2y spread
+    - T10Y3M   # 10y-3m spread
+  credit:
+    - BAMLH0A0HYM2   # HY OAS
+    - BAMLC0A0CM     # IG OAS
+    - TEDRATE
+  inflation:
+    - CPIAUCSL
+    - CPILFESL
+    - T5YIE      # 5y breakeven
+    - T10YIE     # 10y breakeven
+    - T5YIFR     # 5y5y forward
+  macro:
+    - GDP
+    - GDPC1
+    - UNRATE
+    - PAYEMS
+    - INDPRO
+    - RSAFS
+    - HOUST
+    - UMCSENT
+    - VIXCLS
+    - DTWEXBGS   # Dollar index broad
+    - DCOILWTICO
+    - DCOILBRENTEU
+    - GOLDAMGBD228NLBM
+priority: high
+backfill_years: 50

@@ -1,0 +1,28 @@
+name: global_indexes
+asset_class: index
+source: fmp
+description: Major global equity indexes via FMP stable indexes endpoint
+symbols:
+  - ^GSPC   # S&P 500
+  - ^DJI    # Dow
+  - ^IXIC   # Nasdaq Composite
+  - ^NDX    # Nasdaq 100
+  - ^RUT    # Russell 2000
+  - ^VIX    # VIX
+  - ^VVIX   # Vol of VIX
+  - ^N225   # Nikkei 225
+  - ^HSI    # Hang Seng
+  - ^FTSE   # FTSE 100
+  - ^GDAXI  # DAX
+  - ^FCHI   # CAC 40
+  - ^STOXX50E  # Euro Stoxx 50
+  - ^AXJO   # ASX 200
+  - ^KS11   # KOSPI
+  - ^TWII   # Taiwan Weighted
+  - ^BSESN  # Sensex
+  - ^NSEI   # Nifty 50
+  - ^BVSP   # Bovespa
+  - ^MXX    # Mexico IPC
+  - ^TA125.TA  # Tel Aviv 125
+priority: medium
+backfill_years: 20

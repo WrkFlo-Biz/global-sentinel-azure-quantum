@@ -1,0 +1,84 @@
+name: etfs_us
+asset_class: etf
+source: alpaca
+description: Core US ETFs including sector, factor, thematic, leveraged
+symbols:
+  - SPY
+  - QQQ
+  - IWM
+  - DIA
+  - XLK
+  - XLF
+  - XLE
+  - XLV
+  - XLI
+  - XLY
+  - XLP
+  - XLU
+  - XLB
+  - XLRE
+  - XLC
+  - GLD
+  - SLV
+  - USO
+  - UNG
+  - DBA
+  - DBC
+  - TLT
+  - IEF
+  - SHY
+  - LQD
+  - HYG
+  - TIP
+  - UUP
+  - FXE
+  - FXY
+  - ARKK
+  - ARKW
+  - ARKG
+  - SMH
+  - SOXX
+  - IBB
+  - XBI
+  - ITB
+  - XHB
+  - KRE
+  - KBE
+  - JETS
+  - XRT
+  - XOP
+  - OIH
+  - GDX
+  - GDXJ
+  - VNQ
+  - REM
+  - MUB
+  - EMB
+  - PFF
+  - VWO
+  - EEM
+  - EFA
+  - VEA
+  - VXUS
+  - VTI
+  - VOO
+  - VUG
+  - VTV
+  - MTUM
+  - QUAL
+  - USMV
+  - VYM
+  - SCHD
+  - SPHD
+  - DVY
+  - TQQQ
+  - SQQQ
+  - UPRO
+  - SPXU
+  - UVXY
+  - VXX
+  - SVXY
+  - BIL
+  - SHV
+priority: high
+backfill_years: 20
