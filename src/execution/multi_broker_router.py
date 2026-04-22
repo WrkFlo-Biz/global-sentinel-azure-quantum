@@ -376,10 +376,7 @@ def _check_tastytrade_health() -> BrokerHealth:
             "cash_balance": str(bal_data.get("cash-balance", 0)),
             "maintenance_excess": str(bal_data.get("maintenance-excess", "N/A")),
             "auth_method": auth_method,
-            # The installed tastytrade SDK login flow is stale on this VM.
-            # Report health, but do not route orders here until execution is updated.
-            "execution_supported": False,
-            "execution_reason": "sdk_login_deprecated",
+            "execution_supported": True,
         }
     except Exception as e:
         h.error = str(e)[:200]
