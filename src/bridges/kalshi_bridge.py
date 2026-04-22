@@ -7,20 +7,20 @@ import urllib.request
 import urllib.error
 
 KALSHI_BASE = "https://api.elections.kalshi.com/v2"
-KALSHI_TRADING_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_TRADING_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 def iso_now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def _get_trading_auth():
-    """Build RSA-signed auth header for Kalshi trading API (optional, for positions)."""
+def _get_trading_auth_headers(method, path):
+    """Build RSA-PSS signed auth headers for Kalshi trading API."""
     try:
         import time
         import base64
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
-        from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+        from cryptography.hazmat.primitives.asymmetric.padding import PSS, MGF1
         from cryptography.hazmat.primitives.hashes import SHA256
     except ImportError:
         return None
@@ -30,25 +30,29 @@ def _get_trading_auth():
     if not key_id or not private_key_pem:
         return None
 
-    now = int(time.time())
-    ts_ms = now * 1000
-    path = "/trade-api/v2/portfolio/positions"
+    ts_ms = str(int(time.time() * 1000))
     pem_bytes = private_key_pem.replace("\\n", "\n").encode()
     private_key = load_pem_private_key(pem_bytes, password=None)
-    msg = f"{ts_ms}GET{path}".encode()
-    signature = private_key.sign(msg, PKCS1v15(), SHA256())
+    msg = f"{ts_ms}{method}{path}".encode()
+    signature = private_key.sign(msg, PSS(mgf=MGF1(SHA256()), salt_length=PSS.MAX_LENGTH), SHA256())
     sig_b64 = base64.b64encode(signature).decode()
-    return f"{key_id}:{ts_ms}:{sig_b64}"
+    return {
+        "KALSHI-ACCESS-KEY": key_id,
+        "KALSHI-ACCESS-SIGNATURE": sig_b64,
+        "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+    }
 
 
 def _fetch_positions():
     """Fetch open Kalshi positions (requires API key)."""
-    auth = _get_trading_auth()
-    if not auth:
+    path = "/trade-api/v2/portfolio/positions"
+    headers = _get_trading_auth_headers("GET", path)
+    if not headers:
         return []
     try:
         req = urllib.request.Request(f"{KALSHI_TRADING_BASE}/portfolio/positions")
-        req.add_header("Authorization", f"Bearer {auth}")
+        for k, v in headers.items():
+            req.add_header(k, v)
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())

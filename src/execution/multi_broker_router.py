@@ -427,45 +427,20 @@ def _check_ibkr_health() -> BrokerHealth:
     return h
 
 
-def _coinbase_jwt(method: str, path: str) -> str:
-    """Build a Coinbase CDP JWT for API authentication."""
-    import hashlib
+def _get_coinbase_client():
+    """Get a Coinbase REST client using the SDK."""
     try:
-        from cryptography.hazmat.primitives.serialization import load_pem_private_key
-        from cryptography.hazmat.primitives.asymmetric.ec import ECDSA
-        from cryptography.hazmat.primitives.hashes import SHA256
+        from coinbase.rest import RESTClient
     except ImportError:
-        return ""
+        return None
 
     key_name = os.getenv("COINBASE_API_KEY_NAME", "")
     private_key_pem = os.getenv("COINBASE_API_PRIVATE_KEY", "")
     if not key_name or not private_key_pem:
-        return ""
+        return None
 
-    import base64
-
-    now = int(time.time())
-    uri = f"{method} {path}"
-
-    header = base64.urlsafe_b64encode(json.dumps(
-        {"alg": "ES256", "kid": key_name, "nonce": hashlib.sha256(os.urandom(16)).hexdigest(),
-         "typ": "JWT"}).encode()).rstrip(b"=").decode()
-    payload = base64.urlsafe_b64encode(json.dumps(
-        {"sub": key_name, "iss": "cdp", "aud": ["retail_rest_api_proxy"],
-         "nbf": now, "exp": now + 120, "uri": uri}).encode()).rstrip(b"=").decode()
-
-    signing_input = f"{header}.{payload}".encode()
-    pem_bytes = private_key_pem.replace("\\n", "\n").encode()
-    private_key = load_pem_private_key(pem_bytes, password=None)
-    der_sig = private_key.sign(signing_input, ECDSA(SHA256()))
-
-    # DER to raw r||s (64 bytes)
-    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-    r, s = decode_dss_signature(der_sig)
-    raw_sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-    sig_b64 = base64.urlsafe_b64encode(raw_sig).rstrip(b"=").decode()
-
-    return f"{header}.{payload}.{sig_b64}"
+    pem = private_key_pem.replace("\\n", "\n")
+    return RESTClient(api_key=key_name, api_secret=pem)
 
 
 def _check_coinbase_health() -> BrokerHealth:
@@ -473,32 +448,21 @@ def _check_coinbase_health() -> BrokerHealth:
     h = BrokerHealth()
     h.last_check = time.time()
     try:
-        key_name = os.getenv("COINBASE_API_KEY_NAME", "")
-        private_key_pem = os.getenv("COINBASE_API_PRIVATE_KEY", "")
-        if not key_name or not private_key_pem:
-            h.error = "no_credentials"
+        client = _get_coinbase_client()
+        if not client:
+            h.error = "no_credentials or coinbase SDK missing"
             return h
 
-        token = _coinbase_jwt("GET", "/api/v3/brokerage/accounts")
-        if not token:
-            h.error = "jwt_build_failed (cryptography pkg missing?)"
-            return h
-
-        req = urllib.request.Request("https://api.coinbase.com/api/v3/brokerage/accounts")
-        req.add_header("Authorization", f"Bearer {token}")
-        req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-
-        accounts = data.get("accounts", [])
-        total_balance = 0.0
+        data = client.get_accounts()
+        accounts = data.get("accounts", []) if isinstance(data, dict) else []
+        total_usd = 0.0
         for acct in accounts:
-            val = float(acct.get("available_balance", {}).get("value", 0) or 0)
-            total_balance += val
+            if acct.get("available_balance", {}).get("currency") == "USD":
+                total_usd += float(acct["available_balance"].get("value", 0) or 0)
 
         h.connected = True
-        h.buying_power = total_balance
-        h.equity = total_balance
+        h.buying_power = total_usd
+        h.equity = total_usd
         h.day_trades_remaining = 999
         h.extra = {
             "num_accounts": len(accounts),
@@ -509,36 +473,37 @@ def _check_coinbase_health() -> BrokerHealth:
     return h
 
 
-KALSHI_TRADING_API = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_TRADING_API = "https://api.elections.kalshi.com/trade-api/v2"
 
 
-def _kalshi_jwt(method: str, path: str) -> str:
-    """Build an RSA-signed JWT for Kalshi trading API authentication."""
+def _kalshi_auth_headers(method: str, path: str) -> Dict[str, str]:
+    """Build RSA-PSS signed auth headers for Kalshi trading API."""
     try:
+        import base64
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
-        from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+        from cryptography.hazmat.primitives.asymmetric.padding import PSS, MGF1
         from cryptography.hazmat.primitives.hashes import SHA256
     except ImportError:
-        return ""
+        return {}
 
     key_id = os.getenv("KALSHI_API_KEY_ID", "")
     private_key_pem = os.getenv("KALSHI_RSA_PRIVATE_KEY", "")
     if not key_id or not private_key_pem:
-        return ""
+        return {}
 
-    import base64
-
-    now = int(time.time())
-    ts_ms = now * 1000
-
+    ts_ms = str(int(time.time() * 1000))
     pem_bytes = private_key_pem.replace("\\n", "\n").encode()
     private_key = load_pem_private_key(pem_bytes, password=None)
 
     msg = f"{ts_ms}{method}{path}".encode()
-    signature = private_key.sign(msg, PKCS1v15(), SHA256())
+    signature = private_key.sign(msg, PSS(mgf=MGF1(SHA256()), salt_length=PSS.MAX_LENGTH), SHA256())
     sig_b64 = base64.b64encode(signature).decode()
 
-    return f"{key_id}:{ts_ms}:{sig_b64}"
+    return {
+        "KALSHI-ACCESS-KEY": key_id,
+        "KALSHI-ACCESS-SIGNATURE": sig_b64,
+        "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+    }
 
 
 def _check_kalshi_health() -> BrokerHealth:
@@ -553,13 +518,14 @@ def _check_kalshi_health() -> BrokerHealth:
             return h
 
         path = "/trade-api/v2/portfolio/balance"
-        auth = _kalshi_jwt("GET", path)
-        if not auth:
-            h.error = "jwt_build_failed (cryptography pkg missing?)"
+        headers = _kalshi_auth_headers("GET", path)
+        if not headers:
+            h.error = "auth_build_failed (cryptography pkg missing?)"
             return h
 
         req = urllib.request.Request(f"{KALSHI_TRADING_API}/portfolio/balance")
-        req.add_header("Authorization", f"Bearer {auth}")
+        for k, v in headers.items():
+            req.add_header(k, v)
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
@@ -571,7 +537,7 @@ def _check_kalshi_health() -> BrokerHealth:
         h.equity = balance_usd
         h.day_trades_remaining = 999
         h.extra = {
-            "payout_available": data.get("payout_available", 0) / 100.0,
+            "portfolio_value": data.get("portfolio_value", 0) / 100.0,
             "execution_supported": True,
         }
     except Exception as e:
@@ -1240,77 +1206,67 @@ def _execute_ibkr_forex(symbol: str, qty: int, side: str, order_type: str,
 
 def _execute_coinbase(symbol: str, qty: int, side: str, order_type: str,
                       limit_price: Optional[float], notional: Optional[float] = None) -> Dict[str, Any]:
-    """Execute crypto trade via Coinbase Advanced Trade REST API."""
+    """Execute crypto trade via Coinbase Advanced Trade SDK."""
+    import uuid
+
+    client = _get_coinbase_client()
+    if not client:
+        return {"error": "coinbase_sdk_missing_or_no_credentials"}
+
     sym = symbol.upper().replace("/", "-")
     if not sym.endswith("-USD"):
         sym = f"{sym}-USD" if not sym.endswith("USD") else f"{sym[:-3]}-USD"
 
-    product_id = sym
-
-    order_config: Dict[str, Any]
-    if order_type == "limit" and limit_price:
-        order_config = {
-            "limit_limit_gtc": {
-                "limit_price": str(limit_price),
-                "base_size": str(abs(qty)) if qty else "0",
-            }
-        }
-    elif notional and notional > 0:
-        order_config = {
-            "market_market_ioc": {
-                "quote_size": str(round(notional, 2)),
-            }
-        }
-    else:
-        order_config = {
-            "market_market_ioc": {
-                "base_size": str(abs(qty)),
-            }
-        }
-
-    import uuid
-    payload = {
-        "client_order_id": str(uuid.uuid4()),
-        "product_id": product_id,
-        "side": side.upper(),
-        "order_configuration": order_config,
-    }
+    client_order_id = str(uuid.uuid4())
 
     try:
-        token = _coinbase_jwt("POST", "/api/v3/brokerage/orders")
-        if not token:
-            return {"error": "coinbase_jwt_failed"}
-
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            "https://api.coinbase.com/api/v3/brokerage/orders",
-            data=body, method="POST")
-        req.add_header("Authorization", f"Bearer {token}")
-        req.add_header("Content-Type", "application/json")
-
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read())
-
-        success_resp = result.get("success_response", {})
-        err_resp = result.get("error_response", {})
-
-        if result.get("success") or success_resp:
-            return {
-                "status": "submitted",
-                "broker": "coinbase",
-                "order_id": success_resp.get("order_id", ""),
-                "product_id": product_id,
-                "side": side,
-                "qty": str(qty),
-                "notional": str(notional) if notional else None,
-            }
+        if order_type == "limit" and limit_price:
+            result = client.limit_order_gtc(
+                client_order_id=client_order_id,
+                product_id=sym,
+                side=side.upper(),
+                base_size=str(abs(qty)) if qty else "0",
+                limit_price=str(limit_price),
+            )
+        elif notional and notional > 0:
+            result = client.market_order(
+                client_order_id=client_order_id,
+                product_id=sym,
+                side=side.upper(),
+                quote_size=str(round(notional, 2)),
+            )
         else:
-            return {
-                "error": f"coinbase_order_rejected: {err_resp.get('error', err_resp.get('message', str(result)[:200]))}",
-            }
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode() if e.fp else str(e)
-        return {"error": f"coinbase_http_{e.code}", "details": err_body[:300]}
+            result = client.market_order(
+                client_order_id=client_order_id,
+                product_id=sym,
+                side=side.upper(),
+                base_size=str(abs(qty)),
+            )
+
+        if isinstance(result, dict):
+            success = result.get("success_response", result.get("success", {}))
+            err = result.get("error_response", {})
+            if success or result.get("success"):
+                return {
+                    "status": "submitted",
+                    "broker": "coinbase",
+                    "order_id": (success or {}).get("order_id", ""),
+                    "product_id": sym,
+                    "side": side,
+                    "qty": str(qty),
+                    "notional": str(notional) if notional else None,
+                }
+            elif err:
+                return {"error": f"coinbase_rejected: {err.get('message', str(err)[:200])}"}
+
+        return {
+            "status": "submitted",
+            "broker": "coinbase",
+            "product_id": sym,
+            "side": side,
+            "qty": str(qty),
+            "raw": str(result)[:300],
+        }
     except Exception as e:
         return {"error": f"coinbase: {str(e)[:300]}"}
 
@@ -1425,9 +1381,9 @@ def _execute_kalshi(symbol: str, qty: int, side: str, order_type: str,
     """Execute event contract trade on Kalshi. Symbol is the market ticker."""
     try:
         path = "/trade-api/v2/portfolio/orders"
-        auth = _kalshi_jwt("POST", path)
-        if not auth:
-            return {"error": "kalshi_jwt_failed"}
+        headers = _kalshi_auth_headers("POST", path)
+        if not headers:
+            return {"error": "kalshi_auth_failed"}
 
         order_payload: Dict[str, Any] = {
             "ticker": symbol,
@@ -1443,7 +1399,8 @@ def _execute_kalshi(symbol: str, qty: int, side: str, order_type: str,
         req = urllib.request.Request(
             f"{KALSHI_TRADING_API}/portfolio/orders",
             data=body, method="POST")
-        req.add_header("Authorization", f"Bearer {auth}")
+        for k, v in headers.items():
+            req.add_header(k, v)
         req.add_header("Content-Type", "application/json")
 
         with urllib.request.urlopen(req, timeout=15) as resp:
