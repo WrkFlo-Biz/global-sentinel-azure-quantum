@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-Multi-Broker Smart Router v2.0 for Global Sentinel
+Multi-Broker Smart Router v3.1 for Global Sentinel
 ===================================================
-Actively routes trades across all 3 brokers:
-  - Alpaca  (paper + live, stocks, crypto, free commissions)
-  - Tastytrade (cash account, unlimited day trades, options specialist)
-  - IBKR (global markets, forex, futures via ib_async)
+Routes trades across all 5 brokers with failover:
+  - Alpaca    (paper + live, stocks, options, crypto)
+  - TastyTrade (cash, unlimited day trades, options, crypto options, FX)
+  - IBKR      (futures, forex, international, options via ib_async)
+  - Coinbase  (crypto spot via Advanced Trade CDP API)
+  - Kalshi    (event contracts / prediction markets via RSA-signed REST)
 
-Routing logic:
-  - 0DTE / day-trade options  -> Tastytrade
-  - Weekly/monthly options    -> cheapest commission broker
-  - Stocks overnight          -> Alpaca
-  - International / forex     -> IBKR
-  - Crypto                    -> Alpaca or Tastytrade
-  - Failover on broker down   -> next available
-
-Daemon mode: health-checks every 5 min, logs routing decisions.
+Routing logic — each trade type lists all capable brokers in priority order:
+  - 0DTE / day-trade options  -> TastyTrade > Alpaca > IBKR
+  - Weekly/monthly options    -> Alpaca > TastyTrade > IBKR
+  - Crypto options            -> TastyTrade (exclusive)
+  - Crypto spot               -> Coinbase > Alpaca > TastyTrade
+  - Forex                     -> IBKR > TastyTrade
+  - Futures                   -> IBKR
+  - Stocks                    -> Alpaca > TastyTrade > IBKR
+  - International             -> IBKR > Alpaca
+  - Event contracts           -> Kalshi
+  - Failover on broker down   -> next capable broker in chain
 """
 from __future__ import annotations
 
@@ -23,7 +27,6 @@ import json
 import logging
 import os
 import ssl
-import sys
 import time
 import traceback
 import urllib.request
@@ -31,7 +34,7 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta, date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Paths & logging
@@ -162,6 +165,26 @@ BROKERS = {
                    "international", "options_any"],
         priority=3,
     ),
+    "coinbase": BrokerConfig(
+        name="coinbase",
+        account_type="exchange",
+        has_api=True,
+        unlimited_day_trades=True,
+        options_commission=0.00,
+        stock_commission=0.00,
+        best_for=["crypto", "crypto_spot"],
+        priority=4,
+    ),
+    "kalshi": BrokerConfig(
+        name="kalshi",
+        account_type="exchange",
+        has_api=True,
+        unlimited_day_trades=True,
+        options_commission=0.00,
+        stock_commission=0.00,
+        best_for=["event_contracts", "prediction_markets"],
+        priority=5,
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -195,6 +218,8 @@ _broker_health: Dict[str, BrokerHealth] = {
     "alpaca": BrokerHealth(),
     "tastytrade": BrokerHealth(),
     "ibkr": BrokerHealth(),
+    "coinbase": BrokerHealth(),
+    "kalshi": BrokerHealth(),
 }
 # Tastytrade auth backoff state
 _tastytrade_backoff_until = 0.0
@@ -402,6 +427,158 @@ def _check_ibkr_health() -> BrokerHealth:
     return h
 
 
+def _coinbase_jwt(method: str, path: str) -> str:
+    """Build a Coinbase CDP JWT for API authentication."""
+    import hashlib
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from cryptography.hazmat.primitives.asymmetric.ec import ECDSA
+        from cryptography.hazmat.primitives.hashes import SHA256
+    except ImportError:
+        return ""
+
+    key_name = os.getenv("COINBASE_API_KEY_NAME", "")
+    private_key_pem = os.getenv("COINBASE_API_PRIVATE_KEY", "")
+    if not key_name or not private_key_pem:
+        return ""
+
+    import base64
+
+    now = int(time.time())
+    uri = f"{method} {path}"
+
+    header = base64.urlsafe_b64encode(json.dumps(
+        {"alg": "ES256", "kid": key_name, "nonce": hashlib.sha256(os.urandom(16)).hexdigest(),
+         "typ": "JWT"}).encode()).rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(json.dumps(
+        {"sub": key_name, "iss": "cdp", "aud": ["retail_rest_api_proxy"],
+         "nbf": now, "exp": now + 120, "uri": uri}).encode()).rstrip(b"=").decode()
+
+    signing_input = f"{header}.{payload}".encode()
+    pem_bytes = private_key_pem.replace("\\n", "\n").encode()
+    private_key = load_pem_private_key(pem_bytes, password=None)
+    der_sig = private_key.sign(signing_input, ECDSA(SHA256()))
+
+    # DER to raw r||s (64 bytes)
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    r, s = decode_dss_signature(der_sig)
+    raw_sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    sig_b64 = base64.urlsafe_b64encode(raw_sig).rstrip(b"=").decode()
+
+    return f"{header}.{payload}.{sig_b64}"
+
+
+def _check_coinbase_health() -> BrokerHealth:
+    """Check Coinbase Advanced Trade API connectivity."""
+    h = BrokerHealth()
+    h.last_check = time.time()
+    try:
+        key_name = os.getenv("COINBASE_API_KEY_NAME", "")
+        private_key_pem = os.getenv("COINBASE_API_PRIVATE_KEY", "")
+        if not key_name or not private_key_pem:
+            h.error = "no_credentials"
+            return h
+
+        token = _coinbase_jwt("GET", "/api/v3/brokerage/accounts")
+        if not token:
+            h.error = "jwt_build_failed (cryptography pkg missing?)"
+            return h
+
+        req = urllib.request.Request("https://api.coinbase.com/api/v3/brokerage/accounts")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+
+        accounts = data.get("accounts", [])
+        total_balance = 0.0
+        for acct in accounts:
+            val = float(acct.get("available_balance", {}).get("value", 0) or 0)
+            total_balance += val
+
+        h.connected = True
+        h.buying_power = total_balance
+        h.equity = total_balance
+        h.day_trades_remaining = 999
+        h.extra = {
+            "num_accounts": len(accounts),
+            "execution_supported": True,
+        }
+    except Exception as e:
+        h.error = str(e)[:200]
+    return h
+
+
+KALSHI_TRADING_API = "https://trading-api.kalshi.com/trade-api/v2"
+
+
+def _kalshi_jwt(method: str, path: str) -> str:
+    """Build an RSA-signed JWT for Kalshi trading API authentication."""
+    try:
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+        from cryptography.hazmat.primitives.hashes import SHA256
+    except ImportError:
+        return ""
+
+    key_id = os.getenv("KALSHI_API_KEY_ID", "")
+    private_key_pem = os.getenv("KALSHI_RSA_PRIVATE_KEY", "")
+    if not key_id or not private_key_pem:
+        return ""
+
+    import base64
+
+    now = int(time.time())
+    ts_ms = now * 1000
+
+    pem_bytes = private_key_pem.replace("\\n", "\n").encode()
+    private_key = load_pem_private_key(pem_bytes, password=None)
+
+    msg = f"{ts_ms}{method}{path}".encode()
+    signature = private_key.sign(msg, PKCS1v15(), SHA256())
+    sig_b64 = base64.b64encode(signature).decode()
+
+    return f"{key_id}:{ts_ms}:{sig_b64}"
+
+
+def _check_kalshi_health() -> BrokerHealth:
+    """Check Kalshi trading API connectivity and balance."""
+    h = BrokerHealth()
+    h.last_check = time.time()
+    try:
+        key_id = os.getenv("KALSHI_API_KEY_ID", "")
+        private_key_pem = os.getenv("KALSHI_RSA_PRIVATE_KEY", "")
+        if not key_id or not private_key_pem:
+            h.error = "no_credentials"
+            return h
+
+        path = "/trade-api/v2/portfolio/balance"
+        auth = _kalshi_jwt("GET", path)
+        if not auth:
+            h.error = "jwt_build_failed (cryptography pkg missing?)"
+            return h
+
+        req = urllib.request.Request(f"{KALSHI_TRADING_API}/portfolio/balance")
+        req.add_header("Authorization", f"Bearer {auth}")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+
+        balance_cents = data.get("balance", 0)
+        balance_usd = balance_cents / 100.0
+        h.connected = True
+        h.buying_power = balance_usd
+        h.equity = balance_usd
+        h.day_trades_remaining = 999
+        h.extra = {
+            "payout_available": data.get("payout_available", 0) / 100.0,
+            "execution_supported": True,
+        }
+    except Exception as e:
+        h.error = str(e)[:200]
+    return h
+
+
 def refresh_all_health(force: bool = False) -> Dict[str, Dict[str, Any]]:
     """Refresh health for all brokers. Skips if checked within 60s unless force."""
     now = time.time()
@@ -447,6 +624,20 @@ def refresh_all_health(force: bool = False) -> Dict[str, Dict[str, Any]]:
                      _broker_health["ibkr"].buying_power,
                      _broker_health["ibkr"].error or "OK")
 
+    if now - _broker_health["coinbase"].last_check > cutoff:
+        _broker_health["coinbase"] = _check_coinbase_health()
+        logger.info("Coinbase: connected=%s equity=%.0f %s",
+                     _broker_health["coinbase"].connected,
+                     _broker_health["coinbase"].equity,
+                     _broker_health["coinbase"].error or "OK")
+
+    if now - _broker_health["kalshi"].last_check > cutoff:
+        _broker_health["kalshi"] = _check_kalshi_health()
+        logger.info("Kalshi: connected=%s equity=%.0f %s",
+                     _broker_health["kalshi"].connected,
+                     _broker_health["kalshi"].equity,
+                     _broker_health["kalshi"].error or "OK")
+
     _broker_health.setdefault("alpaca_paper_dt", BrokerHealth())
     _broker_health.setdefault("alpaca_paper_ml", BrokerHealth())
     if now - _broker_health["alpaca_paper_dt"].last_check > cutoff:
@@ -473,7 +664,7 @@ def get_broker_balances() -> Dict[str, Any]:
     """Legacy API -- returns balances dict keyed by broker name."""
     refresh_all_health()
     result = {}
-    for name in ("alpaca", "tastytrade", "ibkr"):
+    for name in ("alpaca", "tastytrade", "ibkr", "coinbase", "kalshi"):
         h = _broker_health[name]
         if h.connected:
             result[name] = {
@@ -508,10 +699,14 @@ def classify_trade(symbol: str, qty: int, side: str, order_type: str,
 
     if asset_class == "crypto":
         return "crypto"
+    if asset_class == "crypto_option":
+        return "crypto_option"
     if asset_class == "forex":
         return "forex"
     if asset_class == "futures":
         return "futures"
+    if asset_class in ("event_contract", "prediction"):
+        return "event_contract"
     if asset_class in ("international", "global"):
         return "international"
 
@@ -542,6 +737,8 @@ COMMISSION_MAP = {
     "tastytrade": {"option": 1.00, "stock": 0.00, "crypto": 0.00},
     "alpaca":     {"option": 0.00, "stock": 0.00, "crypto": 0.00},
     "ibkr":       {"option": 0.65, "stock": 0.005, "crypto": 0.00},
+    "coinbase":   {"option": 0.00, "stock": 0.00, "crypto": 0.00},
+    "kalshi":     {"option": 0.00, "stock": 0.00, "crypto": 0.00, "event": 0.00},
 }
 
 
@@ -561,12 +758,22 @@ ROUTING_TABLE = {
     "day_trade_option": ["tastytrade", "alpaca", "ibkr"],
     "weekly_option":    ["alpaca", "tastytrade", "ibkr"],
     "monthly_option":   ["alpaca", "tastytrade", "ibkr"],
+    "crypto_option":    ["tastytrade"],
     "stock_overnight":  ["alpaca", "tastytrade", "ibkr"],
     "stock_daytrade":   ["tastytrade", "alpaca", "ibkr"],
-    "crypto":           ["alpaca", "tastytrade"],
-    "forex":            ["ibkr"],
+    "crypto":           ["coinbase", "alpaca", "tastytrade"],
+    "forex":            ["ibkr", "tastytrade"],
     "futures":          ["ibkr"],
+    "event_contract":   ["kalshi"],
     "international":    ["ibkr", "alpaca"],
+}
+
+BROKER_CAPABILITIES = {
+    "alpaca":     {"stocks", "options", "crypto"},
+    "tastytrade": {"stocks", "options", "crypto_options", "crypto", "forex"},
+    "ibkr":       {"stocks", "options", "futures", "forex", "international", "bonds"},
+    "coinbase":   {"crypto"},
+    "kalshi":     {"event_contracts"},
 }
 
 
@@ -640,18 +847,50 @@ def _build_reason(broker: str, category: str, idx: int) -> str:
         ("tastytrade", "0dte_option"): "cash account, unlimited day trades for 0DTE",
         ("tastytrade", "day_trade_option"): "cash account, unlimited day trades",
         ("tastytrade", "stock_daytrade"): "cash account, unlimited day trades",
+        ("tastytrade", "crypto_option"): "crypto options specialist (BTC/ETH)",
+        ("tastytrade", "forex"): "TastyTrade FX account",
+        ("tastytrade", "crypto"): "TastyTrade crypto support",
         ("alpaca", "stock_overnight"): "free commissions, already set up for overnight",
         ("alpaca", "weekly_option"): "$0 option commissions",
         ("alpaca", "monthly_option"): "$0 option commissions",
-        ("alpaca", "crypto"): "native crypto trading support",
-        ("ibkr", "forex"): "global markets access, forex specialist",
-        ("ibkr", "futures"): "global markets access, futures specialist",
+        ("alpaca", "crypto"): "native crypto trading, 15 pairs",
+        ("coinbase", "crypto"): "Coinbase Advanced Trade, deep liquidity",
+        ("ibkr", "forex"): "IDEALPRO, global FX access",
+        ("ibkr", "futures"): "GLOBEX/NYMEX/COMEX futures access",
         ("ibkr", "international"): "global markets access",
+        ("kalshi", "event_contract"): "Kalshi event contracts, prediction markets",
     }
     base = reasons.get((broker, category), f"{broker} selected for {category}")
     if idx > 0:
         base = f"FAILOVER: {base}"
     return base
+
+
+def get_all_capable_brokers(asset_class: str) -> List[Dict[str, Any]]:
+    """Return all brokers that support a given instrument type, with health status."""
+    cap_map = {
+        "stocks": ["alpaca", "tastytrade", "ibkr"],
+        "options": ["tastytrade", "alpaca", "ibkr"],
+        "crypto_options": ["tastytrade"],
+        "crypto": ["coinbase", "alpaca", "tastytrade"],
+        "forex": ["ibkr", "tastytrade"],
+        "futures": ["ibkr"],
+        "international": ["ibkr", "alpaca"],
+        "bonds": ["ibkr"],
+        "event_contracts": ["kalshi"],
+    }
+    brokers = cap_map.get(asset_class, [])
+    result = []
+    for b in brokers:
+        h = _broker_health.get(b, BrokerHealth())
+        result.append({
+            "broker": b,
+            "connected": h.connected,
+            "buying_power": h.buying_power,
+            "day_trades_remaining": h.day_trades_remaining,
+            "supports": list(BROKER_CAPABILITIES.get(b, set())),
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -756,7 +995,7 @@ def _execute_alpaca_flatten(symbol: str, account: str = "paper_dt") -> Dict[str,
     req.add_header("APCA-API-SECRET-KEY", secret)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read())
+            resp.read()
         return {"status": "flattened", "broker": "alpaca", "account": account, "symbol": symbol}
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -999,6 +1238,234 @@ def _execute_ibkr_forex(symbol: str, qty: int, side: str, order_type: str,
         return {"error": f"ibkr_forex: {str(e)[:300]}"}
 
 
+def _execute_coinbase(symbol: str, qty: int, side: str, order_type: str,
+                      limit_price: Optional[float], notional: Optional[float] = None) -> Dict[str, Any]:
+    """Execute crypto trade via Coinbase Advanced Trade REST API."""
+    sym = symbol.upper().replace("/", "-")
+    if not sym.endswith("-USD"):
+        sym = f"{sym}-USD" if not sym.endswith("USD") else f"{sym[:-3]}-USD"
+
+    product_id = sym
+
+    order_config: Dict[str, Any]
+    if order_type == "limit" and limit_price:
+        order_config = {
+            "limit_limit_gtc": {
+                "limit_price": str(limit_price),
+                "base_size": str(abs(qty)) if qty else "0",
+            }
+        }
+    elif notional and notional > 0:
+        order_config = {
+            "market_market_ioc": {
+                "quote_size": str(round(notional, 2)),
+            }
+        }
+    else:
+        order_config = {
+            "market_market_ioc": {
+                "base_size": str(abs(qty)),
+            }
+        }
+
+    import uuid
+    payload = {
+        "client_order_id": str(uuid.uuid4()),
+        "product_id": product_id,
+        "side": side.upper(),
+        "order_configuration": order_config,
+    }
+
+    try:
+        token = _coinbase_jwt("POST", "/api/v3/brokerage/orders")
+        if not token:
+            return {"error": "coinbase_jwt_failed"}
+
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            "https://api.coinbase.com/api/v3/brokerage/orders",
+            data=body, method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+
+        success_resp = result.get("success_response", {})
+        err_resp = result.get("error_response", {})
+
+        if result.get("success") or success_resp:
+            return {
+                "status": "submitted",
+                "broker": "coinbase",
+                "order_id": success_resp.get("order_id", ""),
+                "product_id": product_id,
+                "side": side,
+                "qty": str(qty),
+                "notional": str(notional) if notional else None,
+            }
+        else:
+            return {
+                "error": f"coinbase_order_rejected: {err_resp.get('error', err_resp.get('message', str(result)[:200]))}",
+            }
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode() if e.fp else str(e)
+        return {"error": f"coinbase_http_{e.code}", "details": err_body[:300]}
+    except Exception as e:
+        return {"error": f"coinbase: {str(e)[:300]}"}
+
+
+def _execute_tastytrade_forex(symbol: str, qty: int, side: str, order_type: str,
+                              limit_price: Optional[float]) -> Dict[str, Any]:
+    """Execute FX trade via TastyTrade FX account."""
+    try:
+        from tastytrade import Session, Account
+
+        username = ENV.get("TASTYTRADE_USERNAME", "") or os.getenv("TASTYTRADE_USERNAME", "")
+        password = ENV.get("TASTYTRADE_PASSWORD", "") or os.getenv("TASTYTRADE_PASSWORD", "")
+        session = Session(username, password)
+        accounts = Account.get_accounts(session)
+
+        acct = next((a for a in accounts if a.account_number == TASTYTRADE_CASH_ACCOUNT), None)
+        if not acct:
+            acct = accounts[0] if accounts else None
+        if not acct:
+            return {"error": "tastytrade_no_accounts"}
+
+        pair = symbol.upper()
+        if len(pair) == 6:
+            pair = f"{pair[:3]}/{pair[3:]}"
+
+        order_payload = {
+            "time-in-force": "Day",
+            "order-type": "Limit" if order_type == "limit" and limit_price else "Market",
+            "legs": [{
+                "instrument-type": "Forex",
+                "symbol": pair,
+                "action": "Buy to Open" if side == "buy" else "Sell to Close",
+                "quantity": str(abs(qty)),
+            }],
+        }
+        if order_type == "limit" and limit_price:
+            order_payload["price"] = str(limit_price)
+
+        resp = acct.place_order(session, order_payload)
+        return {
+            "status": "submitted",
+            "broker": "tastytrade_fx",
+            "account": acct.account_number,
+            "symbol": pair,
+            "side": side,
+            "qty": str(qty),
+            "order_response": str(resp)[:300],
+        }
+    except ImportError:
+        return {"error": "tastytrade_sdk_not_installed"}
+    except Exception as e:
+        return {"error": f"tastytrade_fx: {str(e)[:300]}"}
+
+
+def _execute_tastytrade_crypto_option(symbol: str, qty: int, side: str, order_type: str,
+                                      limit_price: Optional[float]) -> Dict[str, Any]:
+    """Execute crypto option trade via TastyTrade (BTC/ETH options)."""
+    try:
+        from tastytrade import Session, Account
+        from tastytrade.order import (NewOrder, OrderAction, OrderTimeInForce,
+                                       OrderType, PriceEffect)
+
+        username = ENV.get("TASTYTRADE_USERNAME", "") or os.getenv("TASTYTRADE_USERNAME", "")
+        password = ENV.get("TASTYTRADE_PASSWORD", "") or os.getenv("TASTYTRADE_PASSWORD", "")
+        session = Session(username, password)
+        accounts = Account.get_accounts(session)
+
+        acct = next((a for a in accounts if a.account_number == TASTYTRADE_CASH_ACCOUNT), None)
+        if not acct:
+            acct = accounts[0] if accounts else None
+        if not acct:
+            return {"error": "tastytrade_no_accounts"}
+
+        action = OrderAction.BUY_TO_OPEN if side == "buy" else OrderAction.SELL_TO_CLOSE
+
+        from tastytrade.instruments import CryptocurrencyOption
+        instrument = CryptocurrencyOption.get_cryptocurrency_option(session, symbol)
+
+        if order_type == "limit" and limit_price:
+            order = NewOrder(
+                time_in_force=OrderTimeInForce.DAY,
+                order_type=OrderType.LIMIT,
+                price=float(limit_price),
+                price_effect=PriceEffect.DEBIT if side == "buy" else PriceEffect.CREDIT,
+                legs=[instrument.build_leg(abs(qty), action)],
+            )
+        else:
+            order = NewOrder(
+                time_in_force=OrderTimeInForce.DAY,
+                order_type=OrderType.MARKET,
+                legs=[instrument.build_leg(abs(qty), action)],
+            )
+
+        response = acct.place_order(session, order)
+        return {
+            "status": "submitted",
+            "broker": "tastytrade_crypto_option",
+            "account": acct.account_number,
+            "symbol": symbol,
+            "side": side,
+            "qty": str(qty),
+            "order_response": str(response)[:300],
+        }
+    except ImportError as ie:
+        return {"error": f"tastytrade_sdk: {str(ie)[:200]}"}
+    except Exception as e:
+        return {"error": f"tastytrade_crypto_option: {str(e)[:300]}"}
+
+
+def _execute_kalshi(symbol: str, qty: int, side: str, order_type: str,
+                    limit_price: Optional[float]) -> Dict[str, Any]:
+    """Execute event contract trade on Kalshi. Symbol is the market ticker."""
+    try:
+        path = "/trade-api/v2/portfolio/orders"
+        auth = _kalshi_jwt("POST", path)
+        if not auth:
+            return {"error": "kalshi_jwt_failed"}
+
+        order_payload: Dict[str, Any] = {
+            "ticker": symbol,
+            "action": "buy" if side == "buy" else "sell",
+            "side": "yes",
+            "count": abs(qty),
+            "type": "limit" if order_type == "limit" and limit_price else "market",
+        }
+        if order_type == "limit" and limit_price:
+            order_payload["yes_price"] = int(limit_price * 100)
+
+        body = json.dumps(order_payload).encode()
+        req = urllib.request.Request(
+            f"{KALSHI_TRADING_API}/portfolio/orders",
+            data=body, method="POST")
+        req.add_header("Authorization", f"Bearer {auth}")
+        req.add_header("Content-Type", "application/json")
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+
+        order = result.get("order", {})
+        return {
+            "status": "submitted",
+            "broker": "kalshi",
+            "order_id": order.get("order_id", ""),
+            "ticker": symbol,
+            "side": side,
+            "count": str(qty),
+            "order_status": order.get("status", ""),
+        }
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode() if e.fp else str(e)
+        return {"error": f"kalshi_http_{e.code}", "details": err_body[:300]}
+    except Exception as e:
+        return {"error": f"kalshi: {str(e)[:300]}"}
+
+
 # ---------------------------------------------------------------------------
 # Main entry point: route_and_execute
 # ---------------------------------------------------------------------------
@@ -1072,18 +1539,30 @@ def route_and_execute(symbol: str, qty: int, side: str, order_type: str = "marke
         elif broker == "tastytrade":
             cat = classify_trade(symbol, qty, side, order_type, asset_class,
                                  is_day_trade, expiration)
-            ac = "us_option" if "option" in cat else "us_equity"
-            # Route day trades to cash account (unlimited day trades, no PDT)
-            # Route swing/overnight trades to margin account
-            tt_account = TASTYTRADE_CASH_ACCOUNT if is_day_trade else TASTYTRADE_MARGIN_ACCOUNT
-            exec_result = _execute_tastytrade(
-                symbol, qty, side, order_type, limit_price,
-                asset_class=ac, time_in_force=time_in_force,
-                preferred_account=tt_account)
+            if asset_class == "forex" or cat == "forex":
+                exec_result = _execute_tastytrade_forex(
+                    symbol, qty, side, order_type, limit_price)
+            elif asset_class == "crypto_option" or cat == "crypto_option":
+                exec_result = _execute_tastytrade_crypto_option(
+                    symbol, qty, side, order_type, limit_price)
+            else:
+                ac = "us_option" if "option" in cat else "us_equity"
+                tt_account = TASTYTRADE_CASH_ACCOUNT if is_day_trade else TASTYTRADE_MARGIN_ACCOUNT
+                exec_result = _execute_tastytrade(
+                    symbol, qty, side, order_type, limit_price,
+                    asset_class=ac, time_in_force=time_in_force,
+                    preferred_account=tt_account)
         elif broker == "ibkr":
             exec_result = _execute_ibkr(
                 symbol, qty, side, order_type, limit_price,
                 asset_class=asset_class)
+        elif broker == "coinbase":
+            exec_result = _execute_coinbase(
+                symbol, qty, side, order_type, limit_price,
+                notional=notional)
+        elif broker == "kalshi":
+            exec_result = _execute_kalshi(
+                symbol, qty, side, order_type, limit_price)
         else:
             exec_result = {"error": f"unknown_broker: {broker}"}
     except Exception as e:
@@ -1109,14 +1588,28 @@ def route_and_execute(symbol: str, qty: int, side: str, order_type: str = "marke
                 elif fallback == "tastytrade":
                     cat = classify_trade(symbol, qty, side, order_type, asset_class,
                                          is_day_trade, expiration)
-                    ac = "us_option" if "option" in cat else "us_equity"
-                    exec_result = _execute_tastytrade(
-                        symbol, qty, side, order_type, limit_price,
-                        asset_class=ac, time_in_force=time_in_force)
+                    if asset_class == "forex" or cat == "forex":
+                        exec_result = _execute_tastytrade_forex(
+                            symbol, qty, side, order_type, limit_price)
+                    elif asset_class == "crypto_option" or cat == "crypto_option":
+                        exec_result = _execute_tastytrade_crypto_option(
+                            symbol, qty, side, order_type, limit_price)
+                    else:
+                        ac = "us_option" if "option" in cat else "us_equity"
+                        exec_result = _execute_tastytrade(
+                            symbol, qty, side, order_type, limit_price,
+                            asset_class=ac, time_in_force=time_in_force)
                 elif fallback == "ibkr":
                     exec_result = _execute_ibkr(
                         symbol, qty, side, order_type, limit_price,
                         asset_class=asset_class)
+                elif fallback == "coinbase":
+                    exec_result = _execute_coinbase(
+                        symbol, qty, side, order_type, limit_price,
+                        notional=notional)
+                elif fallback == "kalshi":
+                    exec_result = _execute_kalshi(
+                        symbol, qty, side, order_type, limit_price)
 
                 if not exec_result.get("error"):
                     decision["failover"] = True
@@ -1469,6 +1962,9 @@ if __name__ == "__main__":
             {"label": "Overnight AAPL stock", "symbol": "AAPL", "qty": 10, "side": "buy"},
             {"label": "Crypto BTC/USD", "symbol": "BTC/USD", "qty": 1, "side": "buy", "asset_class": "crypto"},
             {"label": "Forex EUR/USD", "symbol": "EURUSD", "qty": 10000, "side": "buy", "asset_class": "forex"},
+            {"label": "Futures ES", "symbol": "ES", "qty": 1, "side": "buy", "asset_class": "futures"},
+            {"label": "Crypto option BTC", "symbol": "BTC 260425C100000", "qty": 1, "side": "buy", "asset_class": "crypto_option"},
+            {"label": "Event contract FED", "symbol": "FED-26APR-T4.50", "qty": 10, "side": "buy", "asset_class": "event_contract"},
         ]
         for t in tests:
             label = t.pop("label")

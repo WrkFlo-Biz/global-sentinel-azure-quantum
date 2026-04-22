@@ -1,15 +1,70 @@
 #!/usr/bin/env python3
-"""Kalshi Macro/FOMC Bridge — prediction market probabilities for Fed decisions and macro events."""
-import json, datetime, urllib.request
+"""Kalshi Bridge — prediction market probabilities for Fed, macro, and geopolitical events."""
+import json
+import datetime
+import os
+import urllib.request
+import urllib.error
 
 KALSHI_BASE = "https://api.elections.kalshi.com/v2"
+KALSHI_TRADING_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+
 
 def iso_now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
+
+def _get_trading_auth():
+    """Build RSA-signed auth header for Kalshi trading API (optional, for positions)."""
+    try:
+        import time
+        import base64
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+        from cryptography.hazmat.primitives.hashes import SHA256
+    except ImportError:
+        return None
+
+    key_id = os.getenv("KALSHI_API_KEY_ID", "")
+    private_key_pem = os.getenv("KALSHI_RSA_PRIVATE_KEY", "")
+    if not key_id or not private_key_pem:
+        return None
+
+    now = int(time.time())
+    ts_ms = now * 1000
+    path = "/trade-api/v2/portfolio/positions"
+    pem_bytes = private_key_pem.replace("\\n", "\n").encode()
+    private_key = load_pem_private_key(pem_bytes, password=None)
+    msg = f"{ts_ms}GET{path}".encode()
+    signature = private_key.sign(msg, PKCS1v15(), SHA256())
+    sig_b64 = base64.b64encode(signature).decode()
+    return f"{key_id}:{ts_ms}:{sig_b64}"
+
+
+def _fetch_positions():
+    """Fetch open Kalshi positions (requires API key)."""
+    auth = _get_trading_auth()
+    if not auth:
+        return []
+    try:
+        req = urllib.request.Request(f"{KALSHI_TRADING_BASE}/portfolio/positions")
+        req.add_header("Authorization", f"Bearer {auth}")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        positions = data.get("market_positions", [])
+        return [{
+            "ticker": p.get("ticker", ""),
+            "position": p.get("position", 0),
+            "market_exposure": p.get("market_exposure", 0),
+            "realized_pnl": p.get("realized_pnl", 0),
+        } for p in positions if p.get("position", 0) != 0]
+    except Exception:
+        return []
+
+
 def poll():
     results = {"timestamp": iso_now(), "markets": [], "fed_rate": {}, "macro": {}}
-    # Get event markets
     for tag in ["fed-funds-rate", "gdp", "inflation", "recession"]:
         try:
             url = f"{KALSHI_BASE}/events?status=open&series_ticker={tag}&limit=10"
@@ -33,7 +88,10 @@ def poll():
                         results["macro"][market.get("title", "")] = entry["yes_price"]
         except Exception as e:
             results[f"error_{tag}"] = str(e)[:200]
+
+    results["positions"] = _fetch_positions()
     return results
+
 
 if __name__ == "__main__":
     print(json.dumps(poll(), indent=2))
