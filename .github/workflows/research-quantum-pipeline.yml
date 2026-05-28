@@ -84,7 +84,7 @@ jobs:
           PYTHONPATH=. python src/reports/research_quantum_markdown_summary.py || true
 
       - name: Upload research artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: research-quantum-artifacts-${{ inputs.env_name }}
           path: |
