@@ -59,7 +59,7 @@ jobs:
             --output-dir "tests/replays/execution_reliability_smoke/out/${{ matrix.scenario }}"
 
       - name: Upload scenario artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: execution-reliability-${{ matrix.scenario }}
           path: tests/replays/execution_reliability_smoke/out/${{ matrix.scenario }}/

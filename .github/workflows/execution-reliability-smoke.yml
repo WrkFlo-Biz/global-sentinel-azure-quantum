@@ -35,7 +35,7 @@ jobs:
           python tests/replays/execution_reliability_smoke/run_smoke.py --repo-root .
 
       - name: Upload smoke outputs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: execution-reliability-smoke-out
           path: tests/replays/execution_reliability_smoke/out/
