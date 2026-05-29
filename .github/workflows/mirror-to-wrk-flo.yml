@@ -8,10 +8,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: mirror-wrk-flo
-  cancel-in-progress: false
-
 jobs:
   mirror:
     runs-on: ubuntu-latest
