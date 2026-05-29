@@ -19,6 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Push main + tags to Wrk-Flo mirror
         env:
           MIRROR_TOKEN: ${{ secrets.WRKFLO_MIRROR_TOKEN }}
@@ -26,7 +27,6 @@ jobs:
           set -e
           REPO="${GITHUB_REPOSITORY##*/}"
           DEST="https://x-access-token:${MIRROR_TOKEN}@github.com/Wrk-Flo/${REPO}.git"
-          # Bring tags too (checkout fetches them by default with fetch-depth:0 but be explicit)
           git fetch origin "+refs/tags/*:refs/tags/*" || true
           git push --force "$DEST" main
           git push --force --tags "$DEST"
