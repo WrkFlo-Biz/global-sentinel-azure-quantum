@@ -1,6 +1,6 @@
 pyyaml>=6.0.3
 requests>=2.31
-feedparser>=6.0
+feedparser>=6.0.12
 anthropic>=0.40
 openai>=1.50
 python-dotenv>=1.2.2
